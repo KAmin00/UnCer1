@@ -1,0 +1,938 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>ISO 17025 Calibration Certificate Generator</title>
+
+<!-- XLSX -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+<!-- Chart.js -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<!-- jsPDF -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+<style>
+
+body{
+    font-family: Arial;
+    background:#f0f2f5;
+    margin:20px;
+}
+
+.container{
+    background:white;
+    padding:25px;
+    border-radius:12px;
+    box-shadow:0px 0px 10px rgba(0,0,0,0.1);
+}
+
+h2{
+    color:#1565c0;
+}
+
+.section{
+    margin-top:20px;
+}
+
+input{
+    width:300px;
+    padding:10px;
+    margin:5px;
+    border:1px solid #ccc;
+    border-radius:5px;
+}
+
+button{
+    padding:12px 20px;
+    background:#1565c0;
+    color:white;
+    border:none;
+    border-radius:5px;
+    cursor:pointer;
+    font-size:15px;
+}
+
+button:hover{
+    background:#0d47a1;
+}
+
+#results{
+    margin-top:20px;
+    padding:15px;
+    background:#eef5ff;
+    border-radius:10px;
+}
+
+table{
+    width:100%;
+    border-collapse:collapse;
+    margin-top:20px;
+}
+
+table, th, td{
+    border:1px solid #bbb;
+}
+
+th{
+    background:#1565c0;
+    color:white;
+}
+
+th, td{
+    padding:10px;
+    text-align:center;
+}
+
+canvas{
+    margin-top:30px;
+    background:white;
+    border-radius:10px;
+    padding:10px;
+}
+
+.footer{
+    margin-top:30px;
+    color:#777;
+    font-size:14px;
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="container">
+
+<h2>ISO 17025 Calibration Certificate Generator</h2>
+
+<div class="section">
+
+<h3>Laboratory Information</h3>
+
+<input id="lab" placeholder="Laboratory Name"><br>
+
+<input id="cert" placeholder="Certificate Number"><br>
+
+<input id="instrument" placeholder="Instrument Name"><br>
+
+<input id="measurement" placeholder="Measured Value"><br>
+
+<input id="kfactor" type="number" value="2" placeholder="Coverage Factor"><br>
+
+</div>
+
+<div class="section">
+
+<h3>Upload Excel File</h3>
+
+<input type="file" id="excelFile">
+
+<br><br>
+
+<button onclick="processFile()">
+Generate Certificate
+</button>
+
+</div>
+
+<div id="results"></div>
+
+<div id="tableContainer"></div>
+
+<canvas id="mcChart"></canvas>
+
+<canvas id="paretoChart"></canvas>
+
+<div class="footer">
+ISO 17025 Calibration Uncertainty Budget Tool
+</div>
+
+</div>
+
+<script>
+
+let mcChart = null;
+let paretoChart = null;
+
+// =========================================
+// PROCESS EXCEL FILE
+// =========================================
+
+function processFile(){
+
+    const file =
+    document.getElementById(
+        'excelFile'
+    ).files[0];
+
+    if(!file){
+
+        alert(
+            "Please upload Excel file"
+        );
+
+        return;
+    }
+
+    const reader =
+    new FileReader();
+
+    reader.onload = function(e){
+
+        const data =
+        new Uint8Array(
+            e.target.result
+        );
+
+        const workbook =
+        XLSX.read(data,{
+            type:'array'
+        });
+
+        const sheet =
+        workbook.Sheets[
+            workbook.SheetNames[0]
+        ];
+
+        let json =
+        XLSX.utils.sheet_to_json(
+            sheet,
+            {defval:""}
+        );
+
+        // Normalize headers
+        json = json.map(row=>{
+
+            let r = {};
+
+            Object.keys(row).forEach(key=>{
+
+                r[
+                    key.trim()
+                    .toLowerCase()
+                ] = row[key];
+            });
+
+            return r;
+        });
+
+        calculate(json);
+    };
+
+    reader.readAsArrayBuffer(file);
+}
+
+// =========================================
+// MAIN CALCULATION
+// =========================================
+
+function calculate(data){
+
+    let varianceSum = 0;
+
+    let cleaned = [];
+
+    data.forEach(row=>{
+
+        let description =
+        String(
+            row["description"] || ""
+        );
+
+        let u =
+        parseFloat(
+            row["standard uncertainity (%)"]
+        );
+
+        let sensitivity =
+        parseFloat(
+            row["sensitivity coefficient"]
+        );
+
+        let distribution =
+        String(
+            row["probability ditribution"] || ""
+        ).toLowerCase();
+
+        // Ignore bad rows
+        if(
+            isNaN(u) ||
+            isNaN(sensitivity)
+        ){
+            return;
+        }
+
+        // =================================
+        // DISTRIBUTION HANDLING
+        // =================================
+
+        let u_standard = u;
+
+        // Rectangular
+        if(
+            distribution.includes("rect")
+        ){
+
+            u_standard =
+            u / Math.sqrt(3);
+        }
+
+        // Triangular
+        else if(
+            distribution.includes("tri")
+        ){
+
+            u_standard =
+            u / Math.sqrt(6);
+        }
+
+        // t-distribution approximation
+        else if(
+            distribution.includes("t")
+        ){
+
+            u_standard =
+            u / 2;
+        }
+
+        // Apply sensitivity
+        let u_adjusted =
+        u_standard * sensitivity;
+
+        let variance =
+        u_adjusted ** 2;
+
+        varianceSum += variance;
+
+        cleaned.push({
+
+            description,
+            u,
+            distribution,
+            sensitivity,
+            u_standard,
+            u_adjusted,
+            variance
+        });
+    });
+
+    // =================================
+    // COMBINED UNCERTAINTY
+    // =================================
+
+    let uc =
+    Math.sqrt(varianceSum);
+
+    let k =
+    parseFloat(
+        document.getElementById(
+            "kfactor"
+        ).value
+    );
+
+    let U = uc * k;
+
+    // =================================
+    // CONTRIBUTION %
+    // =================================
+
+    cleaned.forEach(row=>{
+
+        row.contribution =
+        (
+            row.variance /
+            varianceSum
+        ) * 100;
+    });
+
+    // =================================
+    // MONTE CARLO SIMULATION
+    // =================================
+
+    let mc = [];
+
+    for(let i=0;i<10000;i++){
+
+        let total = 0;
+
+        cleaned.forEach(row=>{
+
+            total +=
+            normalRandom()
+            * row.u_adjusted;
+        });
+
+        mc.push(total);
+    }
+
+    let mcStd = std(mc);
+
+    // =================================
+    // DISPLAY RESULTS
+    // =================================
+
+    document.getElementById(
+        "results"
+    ).innerHTML = `
+
+    <h3>Calculation Results</h3>
+
+    <p>
+    <b>Combined Standard Uncertainty:</b>
+    ${uc.toFixed(6)}
+    </p>
+
+    <p>
+    <b>Expanded Uncertainty:</b>
+    ±${U.toFixed(6)}
+    </p>
+
+    <p>
+    <b>Monte Carlo Standard Deviation:</b>
+    ${mcStd.toFixed(6)}
+    </p>
+
+    `;
+
+    createTable(cleaned);
+
+    drawHistogram(mc);
+
+    drawPareto(cleaned);
+
+    generatePDF(
+        cleaned,
+        uc,
+        U,
+        mcStd
+    );
+}
+
+// =========================================
+// TABLE
+// =========================================
+
+function createTable(data){
+
+    let html = `
+
+    <table>
+
+    <tr>
+
+    <th>Description</th>
+    <th>Standard Uncertainty</th>
+    <th>Distribution</th>
+    <th>Sensitivity</th>
+    <th>Contribution %</th>
+
+    </tr>
+    `;
+
+    data.forEach(row=>{
+
+        html += `
+
+        <tr>
+
+        <td>${row.description}</td>
+
+        <td>${row.u.toFixed(4)}</td>
+
+        <td>${row.distribution}</td>
+
+        <td>${row.sensitivity.toFixed(4)}</td>
+
+        <td>${row.contribution.toFixed(2)}</td>
+
+        </tr>
+        `;
+    });
+
+    html += "</table>";
+
+    document.getElementById(
+        "tableContainer"
+    ).innerHTML = html;
+}
+
+// =========================================
+// RANDOM NORMAL
+// =========================================
+
+function normalRandom(){
+
+    let u = 0;
+    let v = 0;
+
+    while(u===0)
+        u=Math.random();
+
+    while(v===0)
+        v=Math.random();
+
+    return Math.sqrt(
+        -2*Math.log(u)
+    ) * Math.cos(
+        2*Math.PI*v
+    );
+}
+
+// =========================================
+// STANDARD DEVIATION
+// =========================================
+
+function std(arr){
+
+    let mean =
+    arr.reduce((a,b)=>a+b,0)
+    / arr.length;
+
+    let variance =
+    arr.reduce(
+        (a,b)=>a+(b-mean)**2,
+        0
+    ) / arr.length;
+
+    return Math.sqrt(variance);
+}
+
+// =========================================
+// MONTE CARLO HISTOGRAM
+// =========================================
+
+function drawHistogram(mc){
+
+    const ctx =
+    document.getElementById(
+        'mcChart'
+    );
+
+    if(mcChart)
+        mcChart.destroy();
+
+    let bins = 30;
+
+    let min =
+    Math.min(...mc);
+
+    let max =
+    Math.max(...mc);
+
+    let step =
+    (max-min)/bins;
+
+    let hist =
+    new Array(bins).fill(0);
+
+    mc.forEach(v=>{
+
+        let i =
+        Math.min(
+            bins-1,
+            Math.floor(
+                (v-min)/step
+            )
+        );
+
+        hist[i]++;
+    });
+
+    let labels =
+    hist.map((_,i)=>
+        (min+i*step).toFixed(2)
+    );
+
+    mcChart =
+    new Chart(ctx,{
+
+        type:'bar',
+
+        data:{
+
+            labels:labels,
+
+            datasets:[{
+
+                label:'Monte Carlo Frequency',
+
+                data:hist,
+
+                backgroundColor:
+                'rgba(21,101,192,0.7)'
+            }]
+        },
+
+        options:{
+
+            responsive:true,
+
+            plugins:{
+
+                title:{
+                    display:true,
+                    text:
+                    'Monte Carlo Simulation Histogram'
+                }
+            }
+        }
+    });
+}
+
+// =========================================
+// PARETO CHART
+// =========================================
+
+function drawPareto(data){
+
+    const ctx =
+    document.getElementById(
+        'paretoChart'
+    );
+
+    if(paretoChart)
+        paretoChart.destroy();
+
+    data.sort(
+        (a,b)=>
+        b.contribution -
+        a.contribution
+    );
+
+    paretoChart =
+    new Chart(ctx,{
+
+        type:'bar',
+
+        data:{
+
+            labels:
+            data.map(
+                d=>d.description
+            ),
+
+            datasets:[{
+
+                label:'Contribution %',
+
+                data:
+                data.map(
+                    d=>d.contribution
+                ),
+
+                backgroundColor:
+                'rgba(255,99,132,0.7)'
+            }]
+        },
+
+        options:{
+
+            indexAxis:'y',
+
+            responsive:true,
+
+            plugins:{
+
+                title:{
+                    display:true,
+                    text:
+                    'Uncertainty Contribution Chart'
+                }
+            }
+        }
+    });
+}
+
+// =========================================
+// PDF GENERATOR
+// =========================================
+
+async function generatePDF(
+    data,
+    uc,
+    U,
+    mcStd
+){
+
+    const { jsPDF } =
+    window.jspdf;
+
+    const doc =
+    new jsPDF();
+
+    let y = 20;
+
+    // =====================================
+    // TITLE
+    // =====================================
+
+    doc.setFontSize(20);
+
+    doc.text(
+        "CALIBRATION CERTIFICATE",
+        55,
+        y
+    );
+
+    y += 20;
+
+    doc.setFontSize(12);
+
+    const today =
+    new Date().toLocaleDateString();
+
+    // =====================================
+    // HEADER INFO
+    // =====================================
+
+    doc.text(
+        "Laboratory: "
+        +
+        document.getElementById(
+            "lab"
+        ).value,
+        20,
+        y
+    );
+
+    y += 10;
+
+    doc.text(
+        "Certificate No: "
+        +
+        document.getElementById(
+            "cert"
+        ).value,
+        20,
+        y
+    );
+
+    y += 10;
+
+    doc.text(
+        "Instrument: "
+        +
+        document.getElementById(
+            "instrument"
+        ).value,
+        20,
+        y
+    );
+
+    y += 10;
+
+    doc.text(
+        "Measured Value: "
+        +
+        document.getElementById(
+            "measurement"
+        ).value,
+        20,
+        y
+    );
+
+    y += 10;
+
+    doc.text(
+        "Coverage Factor (k): "
+        +
+        document.getElementById(
+            "kfactor"
+        ).value,
+        20,
+        y
+    );
+
+    y += 10;
+
+    doc.text(
+        "Issue Date: "
+        +
+        today,
+        20,
+        y
+    );
+
+    y += 20;
+
+    // =====================================
+    // SUMMARY
+    // =====================================
+
+    doc.setFontSize(14);
+
+    doc.text(
+        "Uncertainty Summary",
+        20,
+        y
+    );
+
+    y += 12;
+
+    doc.setFontSize(12);
+
+    doc.text(
+        "Combined Standard Uncertainty: "
+        +
+        uc.toFixed(6),
+        25,
+        y
+    );
+
+    y += 10;
+
+    doc.text(
+        "Expanded Uncertainty: ±"
+        +
+        U.toFixed(6),
+        25,
+        y
+    );
+
+    y += 10;
+
+    doc.text(
+        "Monte Carlo Std: "
+        +
+        mcStd.toFixed(6),
+        25,
+        y
+    );
+
+    y += 20;
+
+    // =====================================
+    // TABLE
+    // =====================================
+
+    doc.setFontSize(13);
+
+    doc.text(
+        "Uncertainty Budget",
+        20,
+        y
+    );
+
+    y += 12;
+
+    doc.setFontSize(10);
+
+    doc.text(
+        "Description",
+        20,
+        y
+    );
+
+    doc.text(
+        "Distribution",
+        85,
+        y
+    );
+
+    doc.text(
+        "Sensitivity",
+        135,
+        y
+    );
+
+    doc.text(
+        "Contribution %",
+        165,
+        y
+    );
+
+    y += 5;
+
+    doc.line(20,y,190,y);
+
+    y += 8;
+
+    data.forEach(row=>{
+
+        if(y > 260){
+
+            doc.addPage();
+
+            y = 20;
+        }
+
+        doc.text(
+            String(row.description),
+            20,
+            y
+        );
+
+        doc.text(
+            String(row.distribution),
+            85,
+            y
+        );
+
+        doc.text(
+            row.sensitivity
+            .toFixed(2),
+            140,
+            y
+        );
+
+        doc.text(
+            row.contribution
+            .toFixed(2),
+            170,
+            y
+        );
+
+        y += 8;
+    });
+
+    // =====================================
+    // SIGNATURES
+    // =====================================
+
+    y += 20;
+
+    if(y > 240){
+
+        doc.addPage();
+
+        y = 30;
+    }
+
+    doc.line(20,y,70,y);
+
+    doc.line(120,y,170,y);
+
+    y += 8;
+
+    doc.text(
+        "Authorized Signature",
+        20,
+        y
+    );
+
+    doc.text(
+        "Quality Manager",
+        120,
+        y
+    );
+
+    // =====================================
+    // SAVE
+    // =====================================
+
+    doc.save(
+        "Calibration_Certificate.pdf"
+    );
+}
+
+</script>
+
+</body>
+</html>
